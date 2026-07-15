@@ -1,5 +1,45 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { GeneratedComponent, Provider } from '../types';
+
+export const STORAGE_KEY = 'react-component-generator:history';
+const MAX_HISTORY = 20;
+
+function isValidStoredComponent(c: unknown): c is Omit<GeneratedComponent, 'createdAt'> & { createdAt: string } {
+  if (typeof c !== 'object' || c === null) return false;
+  const candidate = c as Record<string, unknown>;
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.prompt === 'string' &&
+    typeof candidate.code === 'string' &&
+    typeof candidate.createdAt === 'string' &&
+    !Number.isNaN(new Date(candidate.createdAt).getTime())
+  );
+}
+
+function loadStoredComponents(): GeneratedComponent[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return [];
+
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .filter(isValidStoredComponent)
+      .map((c) => ({ ...c, createdAt: new Date(c.createdAt) }))
+      .slice(0, MAX_HISTORY);
+  } catch {
+    return [];
+  }
+}
+
+function persistComponents(components: GeneratedComponent[]): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(components));
+  } catch {
+    // 저장 공간 부족, 프라이빗 브라우징 등으로 실패해도 메모리 상태만으로 계속 동작한다.
+  }
+}
 
 interface UseComponentGeneratorReturn {
   components: GeneratedComponent[];
@@ -11,9 +51,13 @@ interface UseComponentGeneratorReturn {
 }
 
 export function useComponentGenerator(): UseComponentGeneratorReturn {
-  const [components, setComponents] = useState<GeneratedComponent[]>([]);
+  const [components, setComponents] = useState<GeneratedComponent[]>(loadStoredComponents);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    persistComponents(components);
+  }, [components]);
 
   const generate = useCallback(async (prompt: string, apiKey: string | undefined, provider: Provider) => {
     setIsLoading(true);
@@ -39,7 +83,7 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
         createdAt: new Date(),
       };
 
-      setComponents((prev) => [newComponent, ...prev]);
+      setComponents((prev) => [newComponent, ...prev].slice(0, MAX_HISTORY));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(message);
