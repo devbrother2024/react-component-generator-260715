@@ -1,11 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
-import { useComponentGenerator } from './useComponentGenerator';
+import { useComponentGenerator, STORAGE_KEY } from './useComponentGenerator';
 import type { GeneratedComponent } from '../types';
 
-const STORAGE_KEY = 'react-component-generator:history';
-
-function seedStorage(components: Array<Omit<GeneratedComponent, 'createdAt'> & { createdAt: string }>) {
+function seedStorage(components: unknown[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(components));
 }
 
@@ -127,5 +125,35 @@ describe('useComponentGenerator - localStorage 영속화', () => {
 
     expect(result.current.components).toEqual([]);
     expect(readStorage()).toEqual([]);
+  });
+
+  it('스키마가 어긋난 항목은 걸러내고 유효한 항목만 복원한다', () => {
+    seedStorage([
+      { id: 'valid', prompt: '정상 항목', code: 'const A = () => null;', createdAt: '2024-01-01T00:00:00.000Z' },
+      { id: 123, prompt: '잘못된 id', code: 'const B = () => null;', createdAt: '2024-01-02T00:00:00.000Z' },
+      { id: 'no-code', prompt: '코드 없음', createdAt: '2024-01-03T00:00:00.000Z' },
+    ]);
+
+    const { result } = renderHook(() => useComponentGenerator());
+
+    expect(result.current.components).toHaveLength(1);
+    expect(result.current.components[0].id).toBe('valid');
+  });
+
+  it('저장된 히스토리가 20개를 초과하면 로드 시에도 최근 20개로 자른다', () => {
+    const seeded = Array.from({ length: 25 }, (_, i) => ({
+      id: `seed-${i}`,
+      prompt: `프롬프트 ${i}`,
+      code: 'const A = () => null;',
+      createdAt: new Date(2024, 0, i + 1).toISOString(),
+    }));
+    seedStorage(seeded);
+
+    const { result } = renderHook(() => useComponentGenerator());
+
+    expect(result.current.components).toHaveLength(20);
+    expect(result.current.components[0].id).toBe('seed-0');
+    expect(result.current.components.some((c) => c.id === 'seed-19')).toBe(true);
+    expect(result.current.components.some((c) => c.id === 'seed-24')).toBe(false);
   });
 });

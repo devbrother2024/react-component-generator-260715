@@ -1,18 +1,33 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import type { GeneratedComponent, Provider } from '../types';
 
-const STORAGE_KEY = 'react-component-generator:history';
+export const STORAGE_KEY = 'react-component-generator:history';
 const MAX_HISTORY = 20;
+
+function isValidStoredComponent(c: unknown): c is Omit<GeneratedComponent, 'createdAt'> & { createdAt: string } {
+  if (typeof c !== 'object' || c === null) return false;
+  const candidate = c as Record<string, unknown>;
+  return (
+    typeof candidate.id === 'string' &&
+    typeof candidate.prompt === 'string' &&
+    typeof candidate.code === 'string' &&
+    typeof candidate.createdAt === 'string' &&
+    !Number.isNaN(new Date(candidate.createdAt).getTime())
+  );
+}
 
 function loadStoredComponents(): GeneratedComponent[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
 
-    const parsed = JSON.parse(raw) as Array<Omit<GeneratedComponent, 'createdAt'> & { createdAt: string }>;
+    const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.map((c) => ({ ...c, createdAt: new Date(c.createdAt) }));
+    return parsed
+      .filter(isValidStoredComponent)
+      .map((c) => ({ ...c, createdAt: new Date(c.createdAt) }))
+      .slice(0, MAX_HISTORY);
   } catch {
     return [];
   }
@@ -40,6 +55,10 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  useEffect(() => {
+    persistComponents(components);
+  }, [components]);
+
   const generate = useCallback(async (prompt: string, apiKey: string | undefined, provider: Provider) => {
     setIsLoading(true);
     setError(null);
@@ -64,11 +83,7 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
         createdAt: new Date(),
       };
 
-      setComponents((prev) => {
-        const next = [newComponent, ...prev].slice(0, MAX_HISTORY);
-        persistComponents(next);
-        return next;
-      });
+      setComponents((prev) => [newComponent, ...prev].slice(0, MAX_HISTORY));
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Unknown error';
       setError(message);
@@ -78,16 +93,11 @@ export function useComponentGenerator(): UseComponentGeneratorReturn {
   }, []);
 
   const removeComponent = useCallback((id: string) => {
-    setComponents((prev) => {
-      const next = prev.filter((c) => c.id !== id);
-      persistComponents(next);
-      return next;
-    });
+    setComponents((prev) => prev.filter((c) => c.id !== id));
   }, []);
 
   const clearAll = useCallback(() => {
     setComponents([]);
-    persistComponents([]);
   }, []);
 
   return { components, isLoading, error, generate, removeComponent, clearAll };
