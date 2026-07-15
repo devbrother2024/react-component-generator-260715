@@ -135,6 +135,62 @@ async function callGoogle(prompt: string, apiKey: string): Promise<string> {
   return withModelFallback(GOOGLE_MODELS, (model) => callGoogleModel(prompt, apiKey, model));
 }
 
+async function* streamAnthropic(prompt: string, apiKey: string): AsyncGenerator<string> {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-haiku-4-5-20251001',
+      max_tokens: 4096,
+      system: SYSTEM_PROMPT,
+      messages: [{ role: 'user', content: prompt }],
+      stream: true,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Claude API error: ${response.status}`);
+  }
+
+  const reader = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+
+    for (let i = 0; i < lines.length - 1; i++) {
+      const line = lines[i].trim();
+      if (!line || line.startsWith(':')) continue;
+
+      if (line.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(line.slice(6));
+          if (
+            data.type === 'content_block_delta' &&
+            data.delta?.type === 'text_delta' &&
+            data.delta?.text
+          ) {
+            yield data.delta.text;
+          }
+        } catch {
+          // 파싱 실패 무시
+        }
+      }
+    }
+
+    buffer = lines[lines.length - 1];
+  }
+}
+
 const server = Bun.serve({
   port: 3002,
   async fetch(req) {
@@ -188,6 +244,82 @@ const server = Bun.serve({
         const code = ensureRenderCall(stripCodeFences(text));
 
         return Response.json({ code }, { headers: CORS_HEADERS });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Unknown error';
+
+        if (message.includes('503')) {
+          return Response.json(
+            { error: 'API 서버가 일시적으로 과부하 상태입니다. 잠시 후 다시 시도해주세요.' },
+            { status: 503, headers: CORS_HEADERS }
+          );
+        }
+
+        if (message.includes('429')) {
+          return Response.json(
+            { error: '요청이 너무 많습니다. 잠시 후 다시 시도해주세요.' },
+            { status: 429, headers: CORS_HEADERS }
+          );
+        }
+
+        return Response.json(
+          { error: message },
+          { status: 500, headers: CORS_HEADERS }
+        );
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/api/generate/stream') {
+      try {
+        const { prompt, apiKey, provider = 'anthropic' } = (await req.json()) as {
+          prompt: string;
+          apiKey?: string;
+          provider?: Provider;
+        };
+
+        const resolvedKey = resolveApiKey(provider, apiKey);
+
+        if (!resolvedKey) {
+          return Response.json(
+            { error: `API key is required. Set ${provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : 'GOOGLE_API_KEY'} in .env or enter it manually.` },
+            { status: 400, headers: CORS_HEADERS }
+          );
+        }
+
+        if (!prompt) {
+          return Response.json(
+            { error: 'Prompt is required' },
+            { status: 400, headers: CORS_HEADERS }
+          );
+        }
+
+        // Google은 아직 streaming 미지원, Anthropic만
+        if (provider !== 'anthropic') {
+          return Response.json(
+            { error: 'Streaming is only available for Anthropic provider' },
+            { status: 400, headers: CORS_HEADERS }
+          );
+        }
+
+        const { ReadableStream } = await import('stream/web');
+        const responseStream = new ReadableStream({
+          async start(controller) {
+            try {
+              let fullCode = '';
+              for await (const chunk of streamAnthropic(prompt, resolvedKey)) {
+                fullCode += chunk;
+                // 불완전한 코드도 보내기 (프리뷰용)
+                controller.enqueue(new TextEncoder().encode(chunk));
+              }
+            } catch (err) {
+              const message = err instanceof Error ? err.message : 'Unknown error';
+              controller.error(new Error(message));
+            } finally {
+              controller.close();
+            }
+          },
+        });
+
+        return new Response(responseStream, { headers: CORS_HEADERS });
       } catch (err) {
         const message = err instanceof Error ? err.message : 'Unknown error';
 
